@@ -1,0 +1,219 @@
+---
+title: "Data generation example"
+author: "Sahoko Ishida"
+date: "2025-10-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This file shows an example to generate data from additive interaction GP models. First, we load two helper R files that contains functions for computing kernels and for handling computation involving Kronecker products.
+```{r}
+library(here)
+library(tidyverse)
+source(file.path("src","kernel.R"))
+source(file.path("src","kron.R"))
+```
+
+```{r}
+generate_data <- function(model_num, n_grids, x_grids, #df,
+                          l1, l2, l3, Q1, Q2, Q3, 
+                          alpha0, sigma, seed){
+  # Input: 
+  # model_num: interger 1-9 
+  # - 1: main effect,             const + f1 + f2 + f3
+  # - 2: one two-way int effect,  const + f1 + f2 + f3 + f12
+  # - 3: one two-way int effect,  const + f1 + f2 + f3 + f13
+  # - 4: one two-way int effect,  const + f1 + f2 + f3 + f23
+  # - 5: two two-way int effect,  const + f1 + f2 + f3 + f12 + f13
+  # - 6: two two-way int effect,  const + f1 + f2 + f3 + f12 + f23
+  # - 7: two two-way int effect,  const + f1 + f2 + f3 + f13 + f23
+  # - 8: all two-way int effect,  const + f1 + f2 + f3 + f12 + f13 + f23
+  # - 9: saturated int effect,    const + f1 + f2 + f3 + f12 + f13 + f23 + f123
+
+  # Qj: Orthogonal matrices of size nj \times nj consisting of eigenvectors of gram matrix Kj
+  # lj: vector of length nj consisting of eigenvectors of Kj
+  # alpha0: overall scale parameters for additive GP models
+  # sigma: standard deviaiton of the noise term
+  # seed: for random data generation
+  
+  # Output: data frame with columns 
+  # - x_1, x_2, x_3, 
+  # - f_u (for u = \{\epmty, 1,2,3,12,....\})),
+  # - f_all = \sum_u f_u, 
+  # - y = f_all + noise
+  
+  #f1 = Q1 %*% diag(sqrt(l1)) eta eta ~ norm(0,1)
+  
+  set.seed(seed)
+  n1 = n_grids[1]; n2 = n_grids[2]; n3 = n_grids[3]
+  x1_grid = x_grids[[1]]; x2_grid = x_grids[[2]]; x3_grid = x_grids[[3]]
+  
+  df <- expand.grid(x1 = x1_grid, x2 = x2_grid, x3 = x3_grid) |> arrange(x1,x2,x3)
+  
+  a = rnorm(1,0,alpha0)
+  eta1 = rnorm(n1, 0, 1)
+  eta2 = rnorm(n2, 0, 1)
+  eta3 = rnorm(n3, 0, 1)
+  noise = rnorm(n1*n2*n3, 0, sigma)
+  
+  f1 = Q1%*%(sqrt(l1 + 1e-9) * eta1); df1 = data.frame(x1=x1_grid, f1 = f1)
+  f2 = Q2%*%(sqrt(l2 + 1e-9) * eta2); df2 = data.frame(x2=x2_grid, f2 = f2)
+  f3 = Q3%*%(sqrt(l3 + 1e-9) * eta3); df3 = data.frame(x3=x3_grid, f3 = f3)
+  
+  cnames <- c('const', 'f1','f2', 'f3')
+  df <- df |> mutate(const = a)  |>
+    left_join(df1, by = join_by(x1)) |> 
+    left_join(df2, by = join_by(x2)) |> 
+    left_join(df3, by = join_by(x3))
+  ## Adding 12 term
+  if (model_num %in%  c(2,5,6,8,9)){
+    eta12  = rnorm(n1*n2, 0, 1)
+    m = sqrt(c(outer(l2, l1))+ 1e-9) * eta12
+    f12 = mat_vec_prod_simple(Q1,mat_vec_prod_simple(Q2,m))
+    df12 = expand_grid(x1=x1_grid, x2=x2_grid) |> arrange(x1,x2) |> mutate(f12=f12) 
+    df <- df |> left_join(df12, by = join_by(x1, x2))
+    cnames <- c(cnames, 'f12')
+  }
+  ## adding 13 term
+  if (model_num %in% c(3,5,7,8,9)){
+    eta13  = rnorm(n1*n3, 0, 1)
+    m = sqrt(c(outer(l3,l1))+ 1e-9) * eta13
+    f13 = mat_vec_prod_simple(Q1,mat_vec_prod_simple(Q3,m))
+    df13 = expand_grid(x1=x1_grid, x3=x3_grid) |> arrange(x1,x3) |> mutate(f13=f13)
+    df <- df |> left_join(df13, by = join_by(x1, x3))
+    cnames <- c(cnames, 'f13')
+  }
+  # adding 23 term
+  if (model_num %in% c(4,6,7,8,9)){
+    eta23  = rnorm(n2*n3, 0, 1)
+    m = sqrt(c(outer(l3,l2))+ 1e-9) * eta23
+    f23 = mat_vec_prod_simple(Q2,mat_vec_prod_simple(Q3,m))
+    df23 = expand_grid(x2=x2_grid, x3=x3_grid) |> arrange(x2,x3) |> mutate(f23=f23)
+    df <- df |> left_join(df23, by = join_by(x2, x3))
+    cnames <- c(cnames, 'f23')
+  }
+  ## addint 123 term
+  if (model_num==9){
+    eta123  = rnorm(n1*n2, 0, 1)
+    m = sqrt(c(outer(l3,c(outer(l2,l1)))) + 1e-9) * eta123
+    f123 = mat_vec_prod_simple(Q1,mat_vec_prod_simple(Q2,mat_vec_prod_simple(Q3,m)))
+    df123 = expand_grid(x1=x1_grid, x2=x2_grid, x3 = x3_grid) |> arrange(x1,x2,x3) |> mutate(f123=f123)
+    df <- df |> left_join(df123, by = join_by(x1, x2,x3))
+    cnames <- c(cnames, 'f123')
+  }
+  df <- df |> mutate(f_all = rowSums(across(all_of(cnames))),
+                     y = f_all + noise)
+  return(df)
+}
+```
+Choose model_number, kernels, parameter values
+```{r}
+model_num <- 1
+kernel_choice <- c("se","se","se")
+kernel_param_names <- c("rho1","rho2","rho3")
+rho1   <- 1.0
+rho2   <- 1.0
+rho3   <- 1.0
+alpha0 <- 1.0
+alpha1 <- 0.7
+alpha2 <- 0.7
+alpha3 <- 0.7
+sigma  <- 1.0
+rho    <- c(rho1, rho2, rho3)
+```
+
+Choose size of the data to generate including number of trainings, tests
+```{r}
+n_grid <- 50L # N_grid =  n_grids^3 size of the data to be generated 
+N_traing <- 8000L
+N_test <- 2000L
+from   <- -1.0  # x_grid start
+to     <- 1.0 # x_grid end
+initial_seed <- 1234
+```
+Choose training and test sets and store their id-s. Note we do not have to set the cardinality of x_grid for each dimension equal but we choose to do so for convenience.
+```{r}
+set.seed(initial_seed)
+N_grid = n_grid^3
+train_id <- sort(sample(1:N_grid, N_traing))
+rest_id <- c(1:N_grid)[!c(1:N_grid)%in%train_id]
+test_id <- sort(sample(rest_id, N_test))
+rm(rest_id)
+```
+
+Computing kernel matrix. The process depends on what we use to centre the undeliying true process f_1,..., f_3.
+Most natural choice maybe using "all grids". Alternatively choosing training points.
+```{r}
+centring_points_all <- TRUE
+# prepare grid
+x_grid <- seq(from,to,length.out=n_grid)
+X1_grid <- X2_grid <- X3_grid <- matrix(x_grid, n_grid, 1)
+
+# K1-K3
+K1_grid = kernel_matrix(X1_grid, kernel = kernel_choice[1], param = rho[1])
+K2_grid = kernel_matrix(X2_grid, kernel = kernel_choice[2], param = rho[2])
+K3_grid = kernel_matrix(X3_grid, kernel = kernel_choice[3], param = rho[3])
+
+if(centring_points_all){
+  # centring with all grid
+  K1_gram_c <-  (alpha0^2)*(alpha1^2)*center_gram(K1_grid)
+  K2_gram_c <-  (alpha0^2)*(alpha2^2)*center_gram(K2_grid)
+  K3_gram_c <-  (alpha0^2)*(alpha3^2)*center_gram(K3_grid)
+} else {
+  grid <- 
+    expand.grid(x1 = x_grid, x2 = x_grid, x3 = x_grid) |> arrange(x1,x2,x3) |>
+    mutate(id_all = 1:N_grid, in_train = case_when(id_all %in% train_id ~ 1, .default = 0))
+  
+  x1 <- grid |> filter(in_train == 1) |> pull(x1)
+  x2 <- grid |> filter(in_train == 1) |> pull(x2)
+  x3 <- grid |> filter(in_train == 1) |> pull(x3)
+  X1 = matrix(x1, N_traing, 1)
+  X2 = matrix(x2, N_traing, 1)
+  X3 = matrix(x3, N_traing, 1)
+  
+  K1 = kernel_matrix(X1, kernel = kernel_choice[1], param = rho[1])
+  K2 = kernel_matrix(X2, kernel = kernel_choice[2], param = rho[2])
+  K3 = kernel_matrix(X3, kernel = kernel_choice[3], param = rho[3])
+  
+  K1_cross = kernel_matrix(X1, Z = X1_grid, kernel = kernel_choice[1], param = rho[1])
+  K2_cross = kernel_matrix(X2, Z = X2_grid, kernel = kernel_choice[2], param = rho[2])
+  K3_cross = kernel_matrix(X3, Z = X3_grid, kernel = kernel_choice[3], param = rho[3])
+  
+  K1_grid_c <- center_new_mat(K1_grid, K1_cross, K1)
+  K2_grid_c <- center_new_mat(K2_grid, K2_cross, K2)
+  K3_grid_c <- center_new_mat(K3_grid, K3_cross, K3)
+  
+  K1_gram_c = (alpha0^2)*(alpha1^2) * K1_grid_c
+  K2_gram_c = (alpha0^2)*(alpha2^2) * K2_grid_c
+  K3_gram_c = (alpha0^2)*(alpha3^2) * K3_grid_c
+  
+  rm(grid, K1, K2, K3, 
+     K1_cross, K2_cross,K3_cross, 
+     K1_grid_c, K2_grid_c, K3_grid_c
+     )
+}
+
+# eigen decomposition (can use centered version `cen_eigen`, but not necessary)
+E1 = eigen(K1_gram_c); Q1 = E1$vectors; l1 = E1$values
+E2 = eigen(K2_gram_c); Q2 = E2$vectors; l2 = E2$values
+E3 = eigen(K3_gram_c); Q3 = E3$vectors; l3 = E3$values
+
+df <- generate_data(
+      model_num = model_num,
+      n_grids = c(n_grid, n_grid, n_grid),
+      x_grids = list(x_grid, x_grid, x_grid),
+      l1 = l1, l2 = l2, l3 = l3, Q1 = Q1, Q2 = Q2, Q3 = Q3,
+      alpha0 = alpha0, sigma = sigma, seed = 1
+    )
+df <- df |> mutate(id_all = 1:N_grid,
+                   in_train = case_when(id_all %in% train_id ~ 1, .default = 0),
+                   in_test = case_when(id_all %in% test_id ~ 1, .default = 0))
+
+```
+
+
+
+
